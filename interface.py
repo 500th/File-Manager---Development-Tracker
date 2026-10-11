@@ -12,7 +12,7 @@ from file_generator import generate_file
 from folder_cleaner import delete_empty_folders
 from folder_scanner import find_empty_folders
 from validator import validate_folder
-from system_folders import is_system_folder
+from system_folders import make_system_folder_checker
 
 
 def create_interface():
@@ -109,6 +109,11 @@ def create_interface():
     scan_updates = queue.Queue()
     scan_cancel = threading.Event()
     scanning = False
+    # Удаление использует отдельную очередь и событие отмены.
+    delete_updates = queue.Queue()
+    delete_cancel = threading.Event()
+    deleting = False
+    closing = False
     scan_status = tk.StringVar(value="Поиск не запущен")
 
     def set_scan_controls(active):
@@ -118,6 +123,7 @@ def create_interface():
         scan_cancel_button.config(state="normal" if active else "disabled")
         # Индикатор виден только пока идёт поиск или заполнение результата.
         if active:
+            scan_progress.config(mode="indeterminate")
             scan_progress.pack(fill="x", pady=5, before=scan_status_label)
             scan_progress.start(12)
         else:
@@ -188,7 +194,7 @@ def create_interface():
 
     def scan_folders():
         nonlocal scanning
-        if scanning:
+        if scanning or deleting:
             return
         try:
             path = validate_folder(path_var.get().strip())
@@ -237,7 +243,107 @@ def create_interface():
         threading.Thread(target=worker, daemon=True).start()
         root.after(100, check_scan_updates)
 
+    # Виджеты обновляет основной поток; удаление и журнал выполняются в рабочем.
+    def set_delete_controls(active):
+        state = "disabled" if active else "normal"
+        for widget in (*scan_controls, folder_list, exclusion_list):
+            widget.config(state=state)
+        delete_cancel_button.config(state="normal" if active else "disabled")
+        if active:
+            scan_progress.config(mode="determinate", maximum=100, value=0)
+            scan_progress.pack(fill="x", pady=5, before=scan_status_label)
+        else:
+            scan_progress.pack_forget()
+
+    def cancel_deletion():
+        if deleting:
+            delete_cancel.set()
+            delete_cancel_button.config(state="disabled")
+            scan_status.set("Отмена удаления после текущей папки...")
+
+    def finish_deletion(deleted, errors, processed, total, cancelled, selected_indices):
+        deleted_paths = {os.path.normcase(os.path.abspath(path)) for path in deleted}
+        # Соседние удалённые строки убираются одним вызовом, группы — порциями.
+        ranges = []
+        for index in selected_indices:
+            path = os.path.normcase(os.path.abspath(folder_list.get(index)))
+            if path in deleted_paths:
+                if ranges and index == ranges[-1][1] + 1:
+                    ranges[-1][1] = index
+                else:
+                    ranges.append([index, index])
+        ranges.reverse()
+        scan_status.set("Обновление списка...")
+        delete_cancel_button.config(state="disabled")
+
+        def remove_batch(offset=0):
+            nonlocal deleting
+            folder_list.config(state="normal")
+            for first, last in ranges[offset:offset + 100]:
+                folder_list.delete(first, last)
+            folder_list.config(state="disabled")
+            if offset + 100 < len(ranges):
+                root.after(1, remove_batch, offset + 100)
+                return
+            deleting = False
+            set_delete_controls(False)
+            title = "Удаление отменено" if cancelled else "Удаление завершено"
+            scan_status.set(
+                f"{title}. Обработано: {processed} из {total}; "
+                f"удалено: {len(deleted)}; ошибок: {len(errors)}"
+            )
+            if closing:
+                root.destroy()
+                return
+            result = (f"Обработано папок: {processed} из {total}.\n"
+                      f"Удалено: {len(deleted)}. Ошибок: {len(errors)}.")
+            if cancelled:
+                result += "\nУже удалённые папки не восстанавливаются."
+            if errors:
+                result += "\nПодробности записаны в operations.log."
+                messagebox.showwarning(title, result)
+            else:
+                messagebox.showinfo(title, result)
+
+        remove_batch()
+
+    def check_delete_updates():
+        nonlocal deleting
+        try:
+            while True:
+                kind, value = delete_updates.get_nowait()
+                if kind == "progress":
+                    processed, total, removed, errors = value
+                    scan_progress["value"] = processed * 100 / total if total else 0
+                    if not delete_cancel.is_set():
+                        scan_status.set(
+                            f"Обработано: {processed} из {total}; "
+                            f"удалено: {removed}; ошибок: {errors}"
+                        )
+                elif kind == "logging":
+                    delete_cancel_button.config(state="disabled")
+                    scan_status.set("Сохранение журнала удаления...")
+                elif kind == "done":
+                    finish_deletion(*value)
+                    return
+                elif kind == "error":
+                    deleting = False
+                    set_delete_controls(False)
+                    scan_status.set("Ошибка удаления")
+                    if closing:
+                        root.destroy()
+                        return
+                    messagebox.showerror("Ошибка удаления", value)
+                    return
+        except queue.Empty:
+            pass
+        if deleting:
+            root.after(100, check_delete_updates)
+
     def delete_selected():
+        nonlocal deleting
+        if scanning or deleting:
+            return
         indices = folder_list.curselection()
 
         if not indices:
@@ -246,12 +352,14 @@ def create_interface():
 
         selected = [folder_list.get(index) for index in indices]
 
-        # Дополнительное предупреждение действует даже при включённом сканировании.
-        system_paths = [path for path in selected if is_system_folder(path)]
+        # Защищённые корни вычисляются один раз для всех выбранных папок.
+        is_system = make_system_folder_checker()
+        system_paths = [path for path in selected if is_system(path)]
         allow_system = False
         if system_paths:
             choice = warn_system_folders(system_paths)
             if choice == "deselect":
+                system_paths = set(system_paths)
                 for index in indices:
                     if folder_list.get(index) in system_paths:
                         folder_list.selection_clear(index)
@@ -269,30 +377,49 @@ def create_interface():
         ):
             return
 
-        deleted, errors = delete_empty_folders(
-            path_var.get().strip(), selected, allow_system=allow_system
-        )
-        # Журнал сохраняет пути успешно удалённых папок и итог операции.
-        for path in deleted:
-            log_operation(f"Удалена пустая папка: {path}")
-        for path, error in errors:
-            log_error(f"Не удалось удалить {path}: {error}")
-        log_operation(
-            f"Удалено пустых папок: {len(deleted)}; ошибок: {len(errors)}\n"
-        )
+        root_path = path_var.get().strip()
+        delete_cancel.clear()
+        deleting = True
+        set_delete_controls(True)
+        scan_status.set(f"Удаление папок: 0 из {len(selected)}...")
 
-        for index in reversed(indices):
-            if folder_list.get(index) in deleted:
-                folder_list.delete(index)
+        def worker():
+            processed = 0
+            total = len(set(selected))
+            last_update = 0
 
-        # Одно итоговое окно; подробные ошибки сохраняются в журнале.
-        result = f"Удалено папок: {len(deleted)}."
-        if errors:
-            result += (f"\nНе удалось удалить: {len(errors)}.\n"
-                       "Подробности записаны в operations.log.")
-            messagebox.showwarning("Результат удаления", result)
-        else:
-            messagebox.showinfo("Результат удаления", result)
+            def report(count, count_total, removed, errors):
+                nonlocal processed, last_update
+                processed = count
+                now = time.monotonic()
+                if now - last_update >= 0.1 or count == count_total:
+                    delete_updates.put(("progress", (count, count_total, removed, errors)))
+                    last_update = now
+
+            try:
+                deleted, errors = delete_empty_folders(
+                    root_path, selected, allow_system=allow_system,
+                    progress_callback=report, cancel_event=delete_cancel
+                )
+                cancelled = delete_cancel.is_set() and processed < total
+                delete_updates.put(("logging", None))
+                for path in deleted:
+                    log_operation(f"Удалена пустая папка: {path}")
+                for path, error in errors:
+                    log_error(f"Не удалось удалить {path}: {error}")
+                outcome = "Удаление отменено" if cancelled else "Удаление завершено"
+                log_operation(
+                    f"{outcome}: {root_path}; обработано: {processed} из {total}; "
+                    f"удалено пустых папок: {len(deleted)}; ошибок: {len(errors)}\n"
+                )
+            except Exception as error:
+                log_error(f"Ошибка удаления папок: {error}")
+                delete_updates.put(("error", str(error)))
+            else:
+                delete_updates.put(("done", (deleted, errors, processed, total, cancelled, indices)))
+
+        threading.Thread(target=worker).start()
+        root.after(100, check_delete_updates)
 
     def select_all_folders():
         folder_list.selection_set(0, tk.END)
@@ -386,6 +513,10 @@ def create_interface():
     select_button.pack(side="left")
     delete_button = ttk.Button(bottom_buttons, text="Удалить выбранные", command=delete_selected)
     delete_button.pack(side="right")
+    delete_cancel_button = ttk.Button(
+        bottom_buttons, text="Отменить удаление", command=cancel_deletion, state="disabled"
+    )
+    delete_cancel_button.pack(side="right", padx=5)
     scan_controls = (path_entry, choose_button, system_check, add_exclusion_button,
                      remove_exclusion_button, scan_button, select_button, delete_button)
 
@@ -540,4 +671,14 @@ def create_interface():
     )
     cancel_button.pack(anchor="e", pady=5)
 
+    # При закрытии во время удаления сначала останавливаем его и сохраняем итог.
+    def close_window():
+        nonlocal closing
+        if deleting:
+            closing = True
+            cancel_deletion()
+        else:
+            root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", close_window)
     root.mainloop()
