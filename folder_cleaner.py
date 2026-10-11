@@ -1,10 +1,11 @@
 import os
 
-from system_folders import is_system_folder
+from system_folders import make_system_folder_checker
 
 
 # Системные папки удаляются только после явного разрешения из окна предупреждения.
-def delete_empty_folders(root_path, selected_folders, allow_system=False):
+def delete_empty_folders(root_path, selected_folders, allow_system=False,
+                         progress_callback=None, cancel_event=None):
     root = os.path.normcase(os.path.abspath(root_path))
     deleted = []
     errors = []
@@ -15,7 +16,11 @@ def delete_empty_folders(root_path, selected_folders, allow_system=False):
         reverse=True
     )
 
-    for folder in folders:
+    # Корни готовятся один раз; отмена проверяется перед следующей папкой.
+    is_system = make_system_folder_checker() if not allow_system else None
+    for processed, folder in enumerate(folders, start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            break
         path = os.path.abspath(folder)
         normalized_path = os.path.normcase(path)
 
@@ -27,7 +32,7 @@ def delete_empty_folders(root_path, selected_folders, allow_system=False):
                 errors.append((path, "Нельзя удалить исходную папку или папку вне неё"))
                 continue
 
-            if is_system_folder(path) and not allow_system:
+            if not allow_system and is_system(path):
                 errors.append((path, "Системная папка: требуется отдельное подтверждение"))
                 continue
 
@@ -35,5 +40,8 @@ def delete_empty_folders(root_path, selected_folders, allow_system=False):
             deleted.append(path)
         except (OSError, ValueError) as error:
             errors.append((path, str(error)))
+        finally:
+            if progress_callback is not None:
+                progress_callback(processed, len(folders), len(deleted), len(errors))
 
     return deleted, errors
