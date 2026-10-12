@@ -1,21 +1,13 @@
 import os
-import queue
-import threading
-import time
 import tkinter as tk
 
 from tkinter import filedialog, messagebox, ttk
 
-from operation_log import log_operation, log_error
-
-from file_generator import generate_file
-from folder_cleaner import delete_empty_folders
-from folder_scanner import find_empty_folders
-from validator import validate_folder
-from system_folders import make_system_folder_checker
+from operation_controller import OperationController
 
 
 def create_interface():
+    controller = OperationController()
     root = tk.Tk()
     root.title("Утилита файловой системы")
     # Окно располагается по центру рабочей области, с учётом панели задач.
@@ -105,14 +97,10 @@ def create_interface():
             folder_list.delete(0, tk.END)
             exclusion_list.delete(0, tk.END)
 
-    # Фоновый поиск передаёт результаты через очередь; виджеты меняет только Tk.
-    scan_updates = queue.Queue()
-    scan_cancel = threading.Event()
+    # Флаги сохраняют блокировку виджетов до завершения обновления списка.
     scanning = False
-    # Удаление использует отдельную очередь и событие отмены.
-    delete_updates = queue.Queue()
-    delete_cancel = threading.Event()
     deleting = False
+    delete_indices = ()
     closing = False
     scan_status = tk.StringVar(value="Поиск не запущен")
 
@@ -131,7 +119,7 @@ def create_interface():
             scan_progress.pack_forget()
 
     def cancel_scan():
-        scan_cancel.set()
+        controller.cancel_scan()
         scan_cancel_button.config(state="disabled")
         scan_status.set("Отмена поиска...")
 
@@ -149,10 +137,6 @@ def create_interface():
             scanning = False
             set_scan_controls(False)
             scan_status.set(f"Поиск завершён. Проверено: {checked}; найдено: {len(found)}")
-            # Итог поиска завершает группу записей пустой строкой.
-            for error in skipped:
-                log_error(f"Папка пропущена при сканировании {path}: {error}")
-            log_operation(f"Поиск пустых папок: {path}; найдено: {len(found)}\n")
             if skipped:
                 messagebox.showwarning(
                     "Результат поиска",
@@ -167,28 +151,22 @@ def create_interface():
 
     def check_scan_updates():
         nonlocal scanning
-        try:
-            while True:
-                kind, value = scan_updates.get_nowait()
-                if kind == "progress":
-                    if not scan_cancel.is_set():
-                        scan_status.set(f"Идёт поиск. Проверено папок: {value}")
-                elif kind == "done":
-                    finish_scan(*value)
-                    return
-                elif kind in ("cancelled", "error"):
-                    scanning = False
-                    set_scan_controls(False)
-                    if kind == "cancelled":
-                        scan_status.set("Поиск отменён")
-                        log_operation("Поиск пустых папок отменён")
-                    else:
-                        scan_status.set("Ошибка поиска")
-                        log_error(f"Ошибка сканирования: {value}")
-                        messagebox.showerror("Ошибка сканирования", value)
-                    return
-        except queue.Empty:
-            pass
+        for kind, value in controller.poll_scan_updates():
+            if kind == "progress":
+                if not controller.scan_cancel_requested:
+                    scan_status.set(f"Идёт поиск. Проверено папок: {value}")
+            elif kind == "done":
+                finish_scan(*value)
+                return
+            elif kind in ("cancelled", "error"):
+                scanning = False
+                set_scan_controls(False)
+                if kind == "cancelled":
+                    scan_status.set("Поиск отменён")
+                else:
+                    scan_status.set("Ошибка поиска")
+                    messagebox.showerror("Ошибка сканирования", value)
+                return
         if scanning:
             root.after(100, check_scan_updates)
 
@@ -196,51 +174,18 @@ def create_interface():
         nonlocal scanning
         if scanning or deleting:
             return
-        try:
-            path = validate_folder(path_var.get().strip())
-        except ValueError as error:
-            messagebox.showerror("Ошибка", str(error))
-            return
+        path = path_var.get().strip()
         excluded = exclusion_list.get(0, tk.END)
         include_system = include_system_var.get()
+        try:
+            controller.start_scan(path, excluded, include_system)
+        except (ValueError, RuntimeError) as error:
+            messagebox.showerror("Ошибка", str(error))
+            return
         folder_list.delete(0, tk.END)
-        scan_cancel.clear()
         scanning = True
         scan_status.set("Идёт поиск...")
         set_scan_controls(True)
-
-        def worker():
-            skipped = []
-            checked = 0
-            last_update = 0
-
-            def report(count):
-                nonlocal checked, last_update
-                checked = count
-                now = time.monotonic()
-                if now - last_update >= 0.1:
-                    scan_updates.put(("progress", count))
-                    last_update = now
-
-            try:
-                found = find_empty_folders(
-                    path, excluded, include_system=include_system,
-                    skipped_errors=skipped, progress_callback=report,
-                    cancel_event=scan_cancel
-                )
-                root_path = os.path.normcase(os.path.abspath(path))
-                found = [folder for folder in found
-                         if os.path.normcase(os.path.abspath(folder)) != root_path]
-                if scan_cancel.is_set():
-                    raise InterruptedError()
-            except InterruptedError:
-                scan_updates.put(("cancelled", None))
-            except Exception as error:
-                scan_updates.put(("error", str(error)))
-            else:
-                scan_updates.put(("done", (found, skipped, path, checked)))
-
-        threading.Thread(target=worker, daemon=True).start()
         root.after(100, check_scan_updates)
 
     # Виджеты обновляет основной поток; удаление и журнал выполняются в рабочем.
@@ -257,7 +202,7 @@ def create_interface():
 
     def cancel_deletion():
         if deleting:
-            delete_cancel.set()
+            controller.cancel_deletion()
             delete_cancel_button.config(state="disabled")
             scan_status.set("Отмена удаления после текущей папки...")
 
@@ -309,52 +254,43 @@ def create_interface():
 
     def check_delete_updates():
         nonlocal deleting
-        try:
-            while True:
-                kind, value = delete_updates.get_nowait()
-                if kind == "progress":
-                    processed, total, removed, errors = value
-                    scan_progress["value"] = processed * 100 / total if total else 0
-                    if not delete_cancel.is_set():
-                        scan_status.set(
-                            f"Обработано: {processed} из {total}; "
-                            f"удалено: {removed}; ошибок: {errors}"
-                        )
-                elif kind == "logging":
-                    delete_cancel_button.config(state="disabled")
-                    scan_status.set("Сохранение журнала удаления...")
-                elif kind == "done":
-                    finish_deletion(*value)
+        for kind, value in controller.poll_delete_updates():
+            if kind == "progress":
+                processed, total, removed, errors = value
+                scan_progress["value"] = processed * 100 / total if total else 0
+                if not controller.delete_cancel_requested:
+                    scan_status.set(
+                        f"Обработано: {processed} из {total}; "
+                        f"удалено: {removed}; ошибок: {errors}"
+                    )
+            elif kind == "logging":
+                delete_cancel_button.config(state="disabled")
+                scan_status.set("Сохранение журнала удаления...")
+            elif kind == "done":
+                finish_deletion(*value, delete_indices)
+                return
+            elif kind == "error":
+                deleting = False
+                set_delete_controls(False)
+                scan_status.set("Ошибка удаления")
+                if closing:
+                    root.destroy()
                     return
-                elif kind == "error":
-                    deleting = False
-                    set_delete_controls(False)
-                    scan_status.set("Ошибка удаления")
-                    if closing:
-                        root.destroy()
-                        return
-                    messagebox.showerror("Ошибка удаления", value)
-                    return
-        except queue.Empty:
-            pass
+                messagebox.showerror("Ошибка удаления", value)
+                return
         if deleting:
             root.after(100, check_delete_updates)
 
     def delete_selected():
-        nonlocal deleting
+        nonlocal deleting, delete_indices
         if scanning or deleting:
             return
         indices = folder_list.curselection()
-
         if not indices:
             messagebox.showwarning("Удаление", "Сначала выберите папки в списке.")
             return
-
         selected = [folder_list.get(index) for index in indices]
-
-        # Защищённые корни вычисляются один раз для всех выбранных папок.
-        is_system = make_system_folder_checker()
-        system_paths = [path for path in selected if is_system(path)]
+        system_paths = controller.get_system_paths(selected)
         allow_system = False
         if system_paths:
             choice = warn_system_folders(system_paths)
@@ -363,62 +299,27 @@ def create_interface():
                 for index in indices:
                     if folder_list.get(index) in system_paths:
                         folder_list.selection_clear(index)
-                log_operation("Снято выделение системных папок")
+                controller.record_system_choice(choice)
                 return
             if choice != "continue":
                 return
             allow_system = True
-            log_operation("Пользователь разрешил удаление выбранных системных папок")
-
+            controller.record_system_choice(choice)
         if not messagebox.askyesno(
                 "Подтверждение удаления",
                 f"Удалить выбранные папки ({len(selected)})?\n"
                 "Они не попадут в корзину."
         ):
             return
-
-        root_path = path_var.get().strip()
-        delete_cancel.clear()
+        try:
+            controller.start_deletion(path_var.get().strip(), selected, allow_system)
+        except RuntimeError as error:
+            messagebox.showerror("Ошибка удаления", str(error))
+            return
+        delete_indices = indices
         deleting = True
         set_delete_controls(True)
         scan_status.set(f"Удаление папок: 0 из {len(selected)}...")
-
-        def worker():
-            processed = 0
-            total = len(set(selected))
-            last_update = 0
-
-            def report(count, count_total, removed, errors):
-                nonlocal processed, last_update
-                processed = count
-                now = time.monotonic()
-                if now - last_update >= 0.1 or count == count_total:
-                    delete_updates.put(("progress", (count, count_total, removed, errors)))
-                    last_update = now
-
-            try:
-                deleted, errors = delete_empty_folders(
-                    root_path, selected, allow_system=allow_system,
-                    progress_callback=report, cancel_event=delete_cancel
-                )
-                cancelled = delete_cancel.is_set() and processed < total
-                delete_updates.put(("logging", None))
-                for path in deleted:
-                    log_operation(f"Удалена пустая папка: {path}")
-                for path, error in errors:
-                    log_error(f"Не удалось удалить {path}: {error}")
-                outcome = "Удаление отменено" if cancelled else "Удаление завершено"
-                log_operation(
-                    f"{outcome}: {root_path}; обработано: {processed} из {total}; "
-                    f"удалено пустых папок: {len(deleted)}; ошибок: {len(errors)}\n"
-                )
-            except Exception as error:
-                log_error(f"Ошибка удаления папок: {error}")
-                delete_updates.put(("error", str(error)))
-            else:
-                delete_updates.put(("done", (deleted, errors, processed, total, cancelled, indices)))
-
-        threading.Thread(target=worker).start()
         root.after(100, check_delete_updates)
 
     def select_all_folders():
@@ -528,8 +429,6 @@ def create_interface():
     content_var = tk.StringVar(value="Нули")
     status_var = tk.StringVar(value="Ожидание")
 
-    updates = queue.Queue()
-    cancel_event = None
     running = False
 
     def choose_output_folder():
@@ -544,57 +443,44 @@ def create_interface():
         cancel_button.config(state="disabled")
 
     def check_updates():
-        try:
-            while True:
-                kind, value = updates.get_nowait()
-
-                if kind == "progress":
-                    progress_bar["value"] = value
-                    status_var.set(f"Создано: {value}%")
-                elif kind == "done":
-                    finish_operation()
-                    status_var.set("Файл создан")
-                    log_operation(f"Создан файл: {value}")
-                    messagebox.showinfo("Готово", f"Файл создан:\n{value}")
-                elif kind == "cancelled":
-                    finish_operation()
-                    status_var.set("Создание отменено")
-                    log_operation("Создание файла отменено")
-                elif kind == "error":
-                    finish_operation()
-                    status_var.set("Ошибка")
-                    log_error(f"Ошибка создания файла: {value}")
-                    messagebox.showerror("Ошибка создания файла", value)
-        except queue.Empty:
-            pass
-
+        for kind, value in controller.poll_generation_updates():
+            if kind == "progress":
+                progress_bar["value"] = value
+                status_var.set(f"Создано: {value}%")
+            elif kind == "done":
+                finish_operation()
+                status_var.set("Файл создан")
+                messagebox.showinfo("Готово", f"Файл создан:\n{value}")
+            elif kind == "cancelled":
+                finish_operation()
+                status_var.set("Создание отменено")
+            elif kind == "error":
+                finish_operation()
+                status_var.set("Ошибка")
+                messagebox.showerror("Ошибка создания файла", value)
         if running:
             root.after(50, check_updates)
 
     def cancel_creation():
-        if cancel_event is not None:
-            cancel_event.set()
+        if running:
+            controller.cancel_generation()
             cancel_button.config(state="disabled")
             status_var.set("Отмена...")
 
     def create_file():
-        nonlocal cancel_event, running
-
+        nonlocal running
         if running:
             return
-
         folder = output_folder_var.get().strip()
         name = file_name_var.get().strip()
         unit = unit_var.get()
         content_type = content_var.get()
         target = os.path.join(folder, name)
-
         try:
             size = int(file_size_var.get())
         except ValueError:
             messagebox.showerror("Ошибка", "Размер должен быть целым числом.")
             return
-
         overwrite = False
         if os.path.isfile(target):
             overwrite = messagebox.askyesno(
@@ -603,32 +489,16 @@ def create_interface():
             )
             if not overwrite:
                 return
-
-        cancel_event = threading.Event()
+        try:
+            controller.start_generation(folder, name, size, unit, content_type, overwrite)
+        except RuntimeError as error:
+            messagebox.showerror("Ошибка создания файла", str(error))
+            return
         running = True
         progress_bar["value"] = 0
         status_var.set("Создание файла...")
         create_button.config(state="disabled")
         cancel_button.config(state="normal")
-
-        def worker():
-            try:
-                path = generate_file(
-                    folder, name, size, unit, content_type,
-                    overwrite=overwrite,
-                    progress_callback=lambda done, total: updates.put(
-                        ("progress", done * 100 // total)
-                    ),
-                    cancel_event=cancel_event
-                )
-            except InterruptedError:
-                updates.put(("cancelled", None))
-            except (ValueError, OSError) as error:
-                updates.put(("error", str(error)))
-            else:
-                updates.put(("done", path))
-
-        threading.Thread(target=worker).start()
         root.after(50, check_updates)
 
     ttk.Label(generator_tab, text="Папка для сохранения:").pack(anchor="w")
