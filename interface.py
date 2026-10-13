@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 from operation_controller import OperationController
 
 
+# Создаёт окно с двумя вкладками и связывает элементы с контроллером операций.
 def create_interface():
     controller = OperationController()
     root = tk.Tk()
@@ -44,10 +45,11 @@ def create_interface():
     # Системные папки включаются пользователем; смена режима сбрасывает старый результат.
     include_system_var = tk.BooleanVar(value=False)
 
+    # Очищает результаты при изменении режима поиска системных папок.
     def change_system_mode():
         folder_list.delete(0, tk.END)
 
-    # Окно с перечнем системных папок и тремя вариантами действия.
+    # Показывает предупреждение о защищённых папках и возвращает выбор пользователя.
     def warn_system_folders(paths):
         dialog = tk.Toplevel(root)
         dialog.title("Выбраны системные папки")
@@ -67,6 +69,7 @@ def create_interface():
         for path in paths:
             paths_box.insert(tk.END, path)
 
+        # Сохраняет выбранное действие и закрывает окно предупреждения.
         def finish(value):
             choice[0] = value
             dialog.destroy()
@@ -90,6 +93,7 @@ def create_interface():
         root.wait_window(dialog)
         return choice[0]
 
+    # Выбирает корневую папку и сбрасывает результаты и исключения.
     def choose_folder():
         folder = filedialog.askdirectory()
         if folder:
@@ -104,6 +108,7 @@ def create_interface():
     closing = False
     scan_status = tk.StringVar(value="Поиск не запущен")
 
+    # Блокирует элементы на время поиска и управляет индикатором активности.
     def set_scan_controls(active):
         state = "disabled" if active else "normal"
         for widget in scan_controls:
@@ -118,14 +123,16 @@ def create_interface():
             scan_progress.stop()
             scan_progress.pack_forget()
 
+    # Запрашивает отмену поиска и обновляет состояние кнопки и подписи.
     def cancel_scan():
         controller.cancel_scan()
         scan_cancel_button.config(state="disabled")
         scan_status.set("Отмена поиска...")
 
+    # Выводит найденные папки и итог поиска в интерфейсе.
     def finish_scan(found, skipped, path, checked):
         nonlocal scanning
-        # Большой результат добавляется порциями, чтобы окно продолжало отвечать.
+        # Добавляет найденные пути порциями, чтобы окно продолжало отвечать.
         def insert_batch(offset=0):
             nonlocal scanning
             batch = found[offset:offset + 300]
@@ -149,6 +156,7 @@ def create_interface():
         scan_cancel_button.config(state="disabled")
         insert_batch()
 
+    # Получает сообщения контроллера и обновляет ход или результат поиска.
     def check_scan_updates():
         nonlocal scanning
         for kind, value in controller.poll_scan_updates():
@@ -170,6 +178,7 @@ def create_interface():
         if scanning:
             root.after(100, check_scan_updates)
 
+    # Считывает параметры и запускает поиск через контроллер.
     def scan_folders():
         nonlocal scanning
         if scanning or deleting:
@@ -188,7 +197,7 @@ def create_interface():
         set_scan_controls(True)
         root.after(100, check_scan_updates)
 
-    # Виджеты обновляет основной поток; удаление и журнал выполняются в рабочем.
+    # Блокирует изменение списка и показывает прогресс во время удаления.
     def set_delete_controls(active):
         state = "disabled" if active else "normal"
         for widget in (*scan_controls, folder_list, exclusion_list):
@@ -200,12 +209,14 @@ def create_interface():
         else:
             scan_progress.pack_forget()
 
+    # Запрашивает остановку удаления перед следующей папкой.
     def cancel_deletion():
         if deleting:
             controller.cancel_deletion()
             delete_cancel_button.config(state="disabled")
             scan_status.set("Отмена удаления после текущей папки...")
 
+    # Убирает успешно удалённые строки и показывает полный или частичный итог.
     def finish_deletion(deleted, errors, processed, total, cancelled, selected_indices):
         deleted_paths = {os.path.normcase(os.path.abspath(path)) for path in deleted}
         # Соседние удалённые строки убираются одним вызовом, группы — порциями.
@@ -221,6 +232,7 @@ def create_interface():
         scan_status.set("Обновление списка...")
         delete_cancel_button.config(state="disabled")
 
+        # Удаляет группы строк порциями и восстанавливает доступность элементов.
         def remove_batch(offset=0):
             nonlocal deleting
             folder_list.config(state="normal")
@@ -252,6 +264,7 @@ def create_interface():
 
         remove_batch()
 
+    # Обновляет прогресс удаления и обрабатывает итоговые сообщения контроллера.
     def check_delete_updates():
         nonlocal deleting
         for kind, value in controller.poll_delete_updates():
@@ -281,6 +294,7 @@ def create_interface():
         if deleting:
             root.after(100, check_delete_updates)
 
+    # Проверяет выделение, запрашивает подтверждения и запускает удаление.
     def delete_selected():
         nonlocal deleting, delete_indices
         if scanning or deleting:
@@ -322,6 +336,7 @@ def create_interface():
         scan_status.set(f"Удаление папок: 0 из {len(selected)}...")
         root.after(100, check_delete_updates)
 
+    # Выделяет все найденные папки в списке.
     def select_all_folders():
         folder_list.selection_set(0, tk.END)
 
@@ -344,6 +359,7 @@ def create_interface():
         wraplength=740
     ).pack(anchor="w", pady=(4, 10))
 
+    # Добавляет исключение из поиска, не позволяя исключить корневую папку.
     def add_exclusion():
         if not os.path.isdir(path_var.get().strip()):
             messagebox.showerror("Ошибка", "Сначала выберите папку для проверки.")
@@ -363,6 +379,7 @@ def create_interface():
             exclusion_list.insert(tk.END, folder)
             folder_list.delete(0, tk.END)
 
+    # Удаляет выбранные исключения и сбрасывает результаты поиска.
     def remove_exclusion():
         for index in reversed(exclusion_list.curselection()):
             exclusion_list.delete(index)
@@ -430,27 +447,37 @@ def create_interface():
     status_var = tk.StringVar(value="Ожидание")
 
     running = False
+    generation_elapsed = 0.0
 
+    # Выбирает папку для сохранения создаваемого файла.
     def choose_output_folder():
         folder = filedialog.askdirectory()
         if folder:
             output_folder_var.set(folder)
 
+    # Восстанавливает состояние кнопок после завершения создания файла.
     def finish_operation():
         nonlocal running
         running = False
         create_button.config(state="normal")
         cancel_button.config(state="disabled")
 
+    # Обновляет прогресс генерации и показывает результат со временем выполнения.
     def check_updates():
+        nonlocal generation_elapsed
         for kind, value in controller.poll_generation_updates():
             if kind == "progress":
                 progress_bar["value"] = value
                 status_var.set(f"Создано: {value}%")
+            elif kind == "elapsed":
+                generation_elapsed = value
             elif kind == "done":
                 finish_operation()
                 status_var.set("Файл создан")
-                messagebox.showinfo("Готово", f"Файл создан:\n{value}")
+                messagebox.showinfo(
+                    "Готово", f"Файл создан:\n{value}\n"
+                    f"Время генерации: {generation_elapsed:.5f} с."
+                )
             elif kind == "cancelled":
                 finish_operation()
                 status_var.set("Создание отменено")
@@ -461,14 +488,16 @@ def create_interface():
         if running:
             root.after(50, check_updates)
 
+    # Запрашивает отмену генерации и обновляет подпись и кнопку.
     def cancel_creation():
         if running:
             controller.cancel_generation()
             cancel_button.config(state="disabled")
             status_var.set("Отмена...")
 
+    # Считывает параметры, подтверждает перезапись и запускает генерацию.
     def create_file():
-        nonlocal running
+        nonlocal running, generation_elapsed
         if running:
             return
         folder = output_folder_var.get().strip()
@@ -495,6 +524,7 @@ def create_interface():
             messagebox.showerror("Ошибка создания файла", str(error))
             return
         running = True
+        generation_elapsed = 0.0
         progress_bar["value"] = 0
         status_var.set("Создание файла...")
         create_button.config(state="disabled")
@@ -541,7 +571,7 @@ def create_interface():
     )
     cancel_button.pack(anchor="e", pady=5)
 
-    # При закрытии во время удаления сначала останавливаем его и сохраняем итог.
+    # При удалении запрашивает отмену и ждёт итог; иначе закрывает окно.
     def close_window():
         nonlocal closing
         if deleting:
