@@ -3,7 +3,7 @@ import os
 from system_folders import make_system_folder_checker
 
 
-# Системные каталоги пропускаются по умолчанию, в том числе при выборе их напрямую.
+# Ищет пустые папки с учётом вложенности, исключений, защиты и отмены.
 def find_empty_folders(
     root_path, excluded_paths=(), include_system=False, skipped_errors=None,
     progress_callback=None, cancel_event=None
@@ -22,6 +22,7 @@ def find_empty_folders(
     # Недоступные папки пропускаются; ошибки возвращаются интерфейсу для журнала.
     inaccessible_paths = set()
 
+    # Пропускает недоступные папки и сохраняет ошибки доступа для журнала.
     def handle_error(error):
         if not isinstance(error, PermissionError):
             raise error

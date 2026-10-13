@@ -4,6 +4,7 @@ import tempfile
 
 from validator import validate_folder, validate_file_parameters
 
+# Создаёт файл заданного размера через временный файл, поддерживает прогресс и отмену.
 def generate_file(
     folder, name, size, unit, content_type,
     overwrite=False, progress_callback=None, cancel_event=None):

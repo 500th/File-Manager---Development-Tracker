@@ -14,9 +14,11 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 
+# Записывает информационное сообщение об операции в журнал.
 def log_operation(message):
     logger.info(message)
 
 
+# Записывает сообщение об ошибке в журнал.
 def log_error(message):
     logger.error(message)

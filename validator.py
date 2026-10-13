@@ -1,12 +1,14 @@
 import os
 
 
+# Проверяет существование папки и возвращает её абсолютный путь.
 def validate_folder(path):
     if not os.path.isdir(path):
         raise ValueError("Выберите существующую папку.")
     return os.path.abspath(path)
 
 
+# Проверяет имя, размер и содержимое файла, возвращает размер в байтах.
 def validate_file_parameters(name, size, unit, content_type):
     if not name or name in (".", "..") or os.path.basename(name) != name:
         raise ValueError("Укажите корректное имя файла")

@@ -3,7 +3,7 @@ import os
 from system_folders import make_system_folder_checker
 
 
-# Системные папки удаляются только после явного разрешения из окна предупреждения.
+# Удаляет выбранные пустые папки с проверкой защиты, прогрессом и отменой.
 def delete_empty_folders(root_path, selected_folders, allow_system=False,
                          progress_callback=None, cancel_event=None):
     root = os.path.normcase(os.path.abspath(root_path))

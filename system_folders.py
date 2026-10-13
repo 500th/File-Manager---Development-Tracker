@@ -2,7 +2,7 @@ import ntpath
 import os
 
 
-# Определение системных каталогов Windows для поиска и удаления.
+# Собирает системные папки Windows и каталоги данных пользовательских профилей.
 def get_system_folders():
     drive = os.environ.get("SystemDrive", "C:")
     roots = [ntpath.join(drive + "\\", name) for name in (
@@ -29,16 +29,18 @@ def get_system_folders():
     return roots
 
 
+# Приводит путь к единому виду для сравнения и учитывает ссылки в Windows.
 def normalize_path(path):
     if os.name == "nt":
         path = os.path.realpath(path)
     return ntpath.normcase(ntpath.abspath(path))
 
 
-# Во время одного поиска корни вычисляются один раз, а не для каждой папки.
+# Готовит защищённые корни один раз и возвращает функцию проверки путей.
 def make_system_folder_checker():
     roots = tuple({normalize_path(root) for root in get_system_folders()})
 
+    # Проверяет, находится ли путь внутри одного из защищённых каталогов.
     def check(path):
         path = normalize_path(path)
         for root in roots:
@@ -52,5 +54,6 @@ def make_system_folder_checker():
     return check
 
 
+# Проверяет один путь, создавая отдельную функцию проверки.
 def is_system_folder(path):
     return make_system_folder_checker()(path)
