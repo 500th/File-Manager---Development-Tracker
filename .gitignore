@@ -3,3 +3,9 @@
 __pycache__/
 *.pyc
 operations.log
+
+# Результаты тестирования
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
