@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 
 
-logger = logging.getLogger("kpo")
+logger = logging.getLogger("file_utility")
 logger.setLevel(logging.INFO)
 
 if not logger.handlers:
