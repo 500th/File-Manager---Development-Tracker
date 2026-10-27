@@ -9,3 +9,8 @@ operations.log
 .coverage
 .coverage.*
 htmlcov/
+
+# Результаты сборки PyInstaller
+build/
+dist/
+*.spec
